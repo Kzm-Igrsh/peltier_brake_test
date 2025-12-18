@@ -4,35 +4,47 @@
 const int PIN_COOL = 32;  // Cool用 (PWM0)
 const int PIN_HEAT = 33;  // Heat用 (PWM1)
 
-// --- パラメータ設定 ---
-// START設定（調整可能）
-int startPower = 100;             // 0-255 (調整可能)
-float startTimeSec = 1.0;         // 秒 (0.1秒刻みで調整可能)
+// --- 温刺激パラメータ ---
+// heat_start (固定)
+int heatStartPower = 240;          // PWM240
+unsigned long heatStartTimeMs = 1000;  // 1秒
 
-// HEAT設定（固定）
-int heatPower = 40;               // 0-255 (固定)
-unsigned long heatTimeMs = 3000;  // 3秒 (固定)
+// heat (固定)
+int heatPower = 40;                // PWM40
+unsigned long heatTimeMs = 3000;   // 3秒
 
-// BRAKE設定（固定）
-int brakePower = 240;             // PWM240で冷却 (固定)
-unsigned long brakeTimeMs = 900;  // 0.9秒 (固定)
+// heat_end (時間のみ調整可能)
+int heatEndPower = 240;            // PWM240で冷却
+float heatEndTimeSec = 1.0;        // 秒 (0.1秒刻みで調整可能)
 
-// COOL設定（固定）
-int coolPower = 240;              // PWM240 (固定)
-unsigned long coolTimeMs = 3000;  // 3秒 (固定)
+// --- 冷刺激パラメータ ---
+// cool_start (固定)
+int coolStartPower = 240;          // PWM240
+unsigned long coolStartTimeMs = 1000;  // 1秒
+
+// cool (固定)
+int coolPower = 240;               // PWM240
+unsigned long coolTimeMs = 3000;   // 3秒
+
+// cool_end (時間のみ調整可能)
+int coolEndPower = 0;              // PWM0 (停止)
+float coolEndTimeSec = 1.0;        // 秒 (0.1秒刻みで調整可能)
 
 // --- 内部変数 ---
 enum State {
   STATE_IDLE,
-  STATE_START,
+  STATE_HEAT_START,
   STATE_HEAT,
-  STATE_BRAKE,
-  STATE_COOL
+  STATE_HEAT_END,
+  STATE_COOL_START,
+  STATE_COOL,
+  STATE_COOL_END
 };
 
 State currentState = STATE_IDLE;
 unsigned long stateStartTime = 0;
-unsigned long startDurationMs = 0;
+unsigned long heatEndDurationMs = 0;
+unsigned long coolEndDurationMs = 0;
 
 // PWMチャンネル
 const int PWM_CH_COOL = 0;
@@ -45,10 +57,8 @@ bool settingComplete = false;
 
 // 関数プロトタイプ
 void setPeltier(int powerCool, int powerHeat);
-void startPhaseStart();
-void startPhaseHeat();
-void startPhaseBrake();
-void startPhaseCool();
+void startHeatStimulus();
+void startCoolStimulus();
 void stopPeltier();
 void drawSettingUI();
 void drawRunningUI();
@@ -67,13 +77,13 @@ void setup() {
   ledcAttachPin(PIN_COOL, PWM_CH_COOL);
   ledcAttachPin(PIN_HEAT, PWM_CH_HEAT);
 
-  // START時間をミリ秒に変換
-  startDurationMs = (unsigned long)(startTimeSec * 1000);
+  // 終了時間をミリ秒に変換
+  heatEndDurationMs = (unsigned long)(heatEndTimeSec * 1000);
+  coolEndDurationMs = (unsigned long)(coolEndTimeSec * 1000);
 
   Serial.println("========================================");
-  Serial.println("Peltier 4-Phase Test");
-  Serial.println("START -> HEAT -> BRAKE -> COOL");
-  Serial.println("Port A (GPIO 32, 33)");
+  Serial.println("Peltier Thermal Stimulus Test");
+  Serial.println("Port A (GPIO 32=Cool, 33=Heat)");
   Serial.println("========================================");
   
   drawSettingUI();
@@ -91,29 +101,60 @@ void loop() {
   unsigned long elapsed = millis() - stateStartTime;
 
   switch (currentState) {
-    case STATE_START:
-      if (elapsed >= startDurationMs) {
-        startPhaseHeat(); // START終了 -> HEATへ
+    case STATE_HEAT_START:
+      if (elapsed >= heatStartTimeMs) {
+        Serial.println("Phase: HEAT");
+        setPeltier(0, heatPower);
+        currentState = STATE_HEAT;
+        stateStartTime = millis();
+        drawRunningUI();
       }
       break;
 
     case STATE_HEAT:
       if (elapsed >= heatTimeMs) {
-        startPhaseBrake(); // HEAT終了 -> BRAKEへ
+        Serial.println("Phase: HEAT_END (Cooling)");
+        setPeltier(heatEndPower, 0);
+        currentState = STATE_HEAT_END;
+        stateStartTime = millis();
+        drawRunningUI();
       }
       break;
 
-    case STATE_BRAKE:
-      if (elapsed >= brakeTimeMs) {
-        startPhaseCool(); // BRAKE終了 -> COOLへ
+    case STATE_HEAT_END:
+      if (elapsed >= heatEndDurationMs) {
+        stopPeltier();
+        currentState = STATE_IDLE;
+        Serial.println("Heat Stimulus Complete.\n");
+        drawRunningUI();
+      }
+      break;
+
+    case STATE_COOL_START:
+      if (elapsed >= coolStartTimeMs) {
+        Serial.println("Phase: COOL");
+        setPeltier(coolPower, 0);
+        currentState = STATE_COOL;
+        stateStartTime = millis();
+        drawRunningUI();
       }
       break;
 
     case STATE_COOL:
       if (elapsed >= coolTimeMs) {
-        stopPeltier(); // COOL終了 -> 停止
+        Serial.println("Phase: COOL_END");
+        setPeltier(coolEndPower, 0);
+        currentState = STATE_COOL_END;
+        stateStartTime = millis();
+        drawRunningUI();
+      }
+      break;
+
+    case STATE_COOL_END:
+      if (elapsed >= coolEndDurationMs) {
+        stopPeltier();
         currentState = STATE_IDLE;
-        Serial.println("Cycle Complete.");
+        Serial.println("Cool Stimulus Complete.\n");
         drawRunningUI();
       }
       break;
@@ -124,13 +165,18 @@ void loop() {
         int x = t.x;
         int y = t.y;
         
-        // STARTボタン
-        if (y >= 135 && y <= 175 && x >= 70 && x <= 250) {
-          startPhaseStart();
+        // HEAT STIMボタン
+        if (y >= 120 && y <= 155 && x >= 20 && x <= 150) {
+          startHeatStimulus();
           drawRunningUI();
         }
-        // BACKボタン (設定画面に戻る)
-        else if (y >= 205 && y <= 235 && x >= 85 && x <= 235) {
+        // COOL STIMボタン
+        else if (y >= 120 && y <= 155 && x >= 170 && x <= 300) {
+          startCoolStimulus();
+          drawRunningUI();
+        }
+        // BACKボタン
+        else if (y >= 200 && y <= 230 && x >= 85 && x <= 235) {
           settingComplete = false;
           drawSettingUI();
         }
@@ -143,49 +189,24 @@ void loop() {
 
 // --- 制御関数 ---
 
-void startPhaseStart() {
-  Serial.println("Phase: START");
-  Serial.printf("  PWM: Cool=0 Heat=%d\n", startPower);
-  Serial.printf("  Duration: %.1f sec\n", startTimeSec);
-  setPeltier(0, startPower);
-  currentState = STATE_START;
+void startHeatStimulus() {
+  Serial.println("\n=== HEAT STIMULUS START ===");
+  Serial.println("Phase: HEAT_START");
+  setPeltier(0, heatStartPower);
+  currentState = STATE_HEAT_START;
   stateStartTime = millis();
 }
 
-void startPhaseHeat() {
-  Serial.println("Phase: HEAT");
-  Serial.printf("  PWM: Cool=0 Heat=%d\n", heatPower);
-  Serial.printf("  Duration: %lu ms\n", heatTimeMs);
-  setPeltier(0, heatPower);
-  currentState = STATE_HEAT;
+void startCoolStimulus() {
+  Serial.println("\n=== COOL STIMULUS START ===");
+  Serial.println("Phase: COOL_START");
+  setPeltier(coolStartPower, 0);
+  currentState = STATE_COOL_START;
   stateStartTime = millis();
-  drawRunningUI();
-}
-
-void startPhaseBrake() {
-  Serial.println("Phase: BRAKE (Cooling)");
-  Serial.printf("  PWM: Cool=%d Heat=0\n", brakePower);
-  Serial.printf("  Duration: %lu ms\n", brakeTimeMs);
-  setPeltier(brakePower, 0);
-  currentState = STATE_BRAKE;
-  stateStartTime = millis();
-  drawRunningUI();
-}
-
-void startPhaseCool() {
-  Serial.println("Phase: COOL");
-  Serial.printf("  PWM: Cool=%d Heat=0\n", coolPower);
-  Serial.printf("  Duration: %lu ms\n", coolTimeMs);
-  setPeltier(coolPower, 0);
-  currentState = STATE_COOL;
-  stateStartTime = millis();
-  drawRunningUI();
 }
 
 void stopPeltier() {
   setPeltier(0, 0);
-  Serial.println("State: STOP");
-  Serial.println("  PWM: Cool=0 Heat=0");
 }
 
 void setPeltier(int powerCool, int powerHeat) {
@@ -199,54 +220,54 @@ void drawSettingUI() {
   M5.Display.clear(BLACK);
   M5.Display.setTextColor(WHITE);
   M5.Display.setTextSize(2);
-  M5.Display.setCursor(50, 5);
-  M5.Display.println("4-Phase Test");
+  M5.Display.setCursor(30, 5);
+  M5.Display.println("Thermal Stim Test");
   
   M5.Display.setTextSize(1);
   M5.Display.setCursor(10, 30);
-  M5.Display.println("START(adj) > HEAT > BRAKE > COOL");
+  M5.Display.println("Port A: Heat & Cool stimulus");
 
-  // START Power調整
+  // Heat End Time調整
   M5.Display.setTextSize(2);
-  M5.Display.setCursor(10, 50);
-  M5.Display.println("START Power:");
+  M5.Display.setCursor(10, 55);
+  M5.Display.println("Heat End(s):");
 
-  M5.Display.fillRect(10, 75, 40, 30, RED);
+  M5.Display.fillRect(10, 80, 40, 30, RED);
   M5.Display.setTextColor(WHITE);
-  M5.Display.setCursor(20, 80);
+  M5.Display.setCursor(20, 85);
   M5.Display.println("-");
 
-  M5.Display.fillRect(60, 75, 40, 30, GREEN);
-  M5.Display.setCursor(70, 80);
+  M5.Display.fillRect(60, 80, 40, 30, GREEN);
+  M5.Display.setCursor(70, 85);
   M5.Display.println("+");
 
   M5.Display.setTextSize(3);
-  M5.Display.setCursor(110, 78);
-  M5.Display.printf("%3d", startPower);
+  M5.Display.setCursor(110, 83);
+  M5.Display.printf("%.1f", heatEndTimeSec);
 
-  // START Time調整
+  // Cool End Time調整
   M5.Display.setTextSize(2);
-  M5.Display.setCursor(10, 115);
-  M5.Display.println("START Time(s):");
+  M5.Display.setCursor(10, 120);
+  M5.Display.println("Cool End(s):");
 
-  M5.Display.fillRect(10, 140, 40, 30, RED);
-  M5.Display.setCursor(20, 145);
+  M5.Display.fillRect(10, 145, 40, 30, RED);
+  M5.Display.setCursor(20, 150);
   M5.Display.println("-");
 
-  M5.Display.fillRect(60, 140, 40, 30, GREEN);
-  M5.Display.setCursor(70, 145);
+  M5.Display.fillRect(60, 145, 40, 30, GREEN);
+  M5.Display.setCursor(70, 150);
   M5.Display.println("+");
 
   M5.Display.setTextSize(3);
-  M5.Display.setCursor(110, 143);
-  M5.Display.printf("%.1f", startTimeSec);
+  M5.Display.setCursor(110, 148);
+  M5.Display.printf("%.1f", coolEndTimeSec);
 
   // 固定パラメータ表示
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(10, 180);
-  M5.Display.println("HEAT:40,3s BRAKE:cool240,0.9s");
-  M5.Display.setCursor(10, 195);
-  M5.Display.println("COOL:240,3s");
+  M5.Display.setCursor(10, 185);
+  M5.Display.println("Heat: 240,1s > 40,3s > 240cool");
+  M5.Display.setCursor(10, 198);
+  M5.Display.println("Cool: 240,1s > 240,3s > stop");
 
   // DONEボタン
   M5.Display.fillRect(85, 210, 150, 25, YELLOW);
@@ -264,29 +285,30 @@ void handleSettingTouch() {
   int y = t.y;
   bool redraw = false;
 
-  // START Power調整
-  if (y >= 75 && y <= 105) {
+  // Heat End Time調整 (0.1秒刻み)
+  if (y >= 80 && y <= 110) {
     if (x >= 10 && x <= 50) {
-      startPower -= 10;
-      if (startPower < 0) startPower = 0;
+      heatEndTimeSec -= 0.1;
+      if (heatEndTimeSec < 0) heatEndTimeSec = 0;
+      heatEndDurationMs = (unsigned long)(heatEndTimeSec * 1000);
       redraw = true;
     } else if (x >= 60 && x <= 100) {
-      startPower += 10;
-      if (startPower > 255) startPower = 255;
+      heatEndTimeSec += 0.1;
+      heatEndDurationMs = (unsigned long)(heatEndTimeSec * 1000);
       redraw = true;
     }
   }
 
-  // START Time調整 (0.1秒刻み)
-  if (y >= 140 && y <= 170) {
+  // Cool End Time調整 (0.1秒刻み)
+  if (y >= 145 && y <= 175) {
     if (x >= 10 && x <= 50) {
-      startTimeSec -= 0.1;
-      if (startTimeSec < 0) startTimeSec = 0;
-      startDurationMs = (unsigned long)(startTimeSec * 1000);
+      coolEndTimeSec -= 0.1;
+      if (coolEndTimeSec < 0) coolEndTimeSec = 0;
+      coolEndDurationMs = (unsigned long)(coolEndTimeSec * 1000);
       redraw = true;
     } else if (x >= 60 && x <= 100) {
-      startTimeSec += 0.1;
-      startDurationMs = (unsigned long)(startTimeSec * 1000);
+      coolEndTimeSec += 0.1;
+      coolEndDurationMs = (unsigned long)(coolEndTimeSec * 1000);
       redraw = true;
     }
   }
@@ -305,38 +327,42 @@ void drawRunningUI() {
   M5.Display.clear(BLACK);
   M5.Display.setTextColor(WHITE);
   M5.Display.setTextSize(2);
-  M5.Display.setCursor(10, 5);
-  M5.Display.println("4-Phase Cycle");
+  M5.Display.setCursor(50, 5);
+  M5.Display.println("Port A Test");
 
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(5, 30);
-  M5.Display.printf("START:heat%d,%.1fs", startPower, startTimeSec);
-  M5.Display.setCursor(5, 43);
-  M5.Display.printf("HEAT:heat40,3s");
-  M5.Display.setCursor(5, 56);
-  M5.Display.printf("BRAKE:cool240,0.9s");
-  M5.Display.setCursor(5, 69);
-  M5.Display.printf("COOL:cool240,3s");
+  M5.Display.setCursor(5, 35);
+  M5.Display.printf("Heat: 240,1s>40,3s>cool240,%.1fs", heatEndTimeSec);
+  M5.Display.setCursor(5, 50);
+  M5.Display.printf("Cool: 240,1s>240,3s>stop%.1fs", coolEndTimeSec);
 
   const char* stateText = "IDLE";
   uint16_t stateColor = WHITE;
   
   switch (currentState) {
-    case STATE_START:
-      stateText = "START";
+    case STATE_HEAT_START:
+      stateText = "HEAT_START";
       stateColor = ORANGE;
       break;
     case STATE_HEAT:
       stateText = "HEAT";
       stateColor = RED;
       break;
-    case STATE_BRAKE:
-      stateText = "BRAKE";
+    case STATE_HEAT_END:
+      stateText = "HEAT_END";
       stateColor = YELLOW;
+      break;
+    case STATE_COOL_START:
+      stateText = "COOL_START";
+      stateColor = CYAN;
       break;
     case STATE_COOL:
       stateText = "COOL";
-      stateColor = CYAN;
+      stateColor = BLUE;
+      break;
+    case STATE_COOL_END:
+      stateText = "COOL_END";
+      stateColor = PURPLE;
       break;
     case STATE_IDLE:
       stateText = "IDLE";
@@ -344,22 +370,29 @@ void drawRunningUI() {
       break;
   }
 
-  M5.Display.setTextSize(4);
+  M5.Display.setTextSize(3);
   M5.Display.setTextColor(stateColor);
-  M5.Display.setCursor(50, 90);
+  M5.Display.setCursor(20, 75);
   M5.Display.println(stateText);
 
   if (currentState == STATE_IDLE) {
-    M5.Display.fillRect(70, 140, 180, 35, GREEN);
-    M5.Display.setTextColor(BLACK);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(100, 148);
-    M5.Display.println("START");
-    
-    M5.Display.fillRect(85, 205, 150, 30, ORANGE);
-    M5.Display.setTextColor(BLACK);
+    // HEAT STIMボタン
+    M5.Display.fillRect(20, 120, 130, 35, RED);
+    M5.Display.setTextColor(WHITE);
     M5.Display.setTextSize(2);
-    M5.Display.setCursor(110, 212);
+    M5.Display.setCursor(30, 130);
+    M5.Display.println("HEAT");
+    
+    // COOL STIMボタン
+    M5.Display.fillRect(170, 120, 130, 35, CYAN);
+    M5.Display.setTextColor(BLACK);
+    M5.Display.setCursor(180, 130);
+    M5.Display.println("COOL");
+    
+    // BACKボタン
+    M5.Display.fillRect(85, 200, 150, 30, ORANGE);
+    M5.Display.setTextColor(BLACK);
+    M5.Display.setCursor(110, 207);
     M5.Display.println("BACK");
   }
 }
